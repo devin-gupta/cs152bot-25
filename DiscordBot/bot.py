@@ -8,8 +8,9 @@ import requests
 import random
 from review import Review, ReviewState 
 from report import Report, State 
-
+from openai import OpenAI
 import pdb
+import base64
 
 # Set up logging to the console
 logger = logging.getLogger('discord')
@@ -85,14 +86,6 @@ class ModBot(discord.Client):
         channel_id = msg.channel.id
         message_id = msg.id
         jump_url = f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
- 
-        embed.add_field("Flagged Message",f"{msg.author.name}: {msg.content}",inline=False)
-        # add the jump link
-        embed.add_field(
-            "Jump to Message",
-            f"[Click here to view original message]({jump_url})",
-            inline=False
-        )
         if not mod_ch:
             return
         embed = discord.Embed(
@@ -100,18 +93,24 @@ class ModBot(discord.Client):
             description=f"User <@{report.author_id}> completed a report.",
             color=discord.Color.red()
         )
-        embed.add_field("Category",     report.type_selected or "N/A", inline=True)
-        embed.add_field("Subtype",      report.subtype_selected or "N/A", inline=True)
+        embed.add_field(name="Flagged Message",value=f"{msg.author.name}: {msg.content}",inline=False)
+        # add the jump link
+        embed.add_field(
+            name="Jump to Message",
+            value=f"[Click here to view original message]({jump_url})",
+            inline=False
+        )
+        embed.add_field(name="Category",     value=report.type_selected or "N/A", inline=True)
+        embed.add_field(name="Subtype",      value=report.subtype_selected or "N/A", inline=True)
         if msg:
-            embed.add_field("Flagged Message", f"{msg.author.name}: {msg.content}", inline=False)
-        embed.add_field("AI Suspected?", report.q1_response or "N/A", inline=True)
-        embed.add_field("User Blocked?",  report.block_response or "N/A", inline=True)
-        embed.set_footer(text=f"Report ID: {mod_msg.id}")
-        self.flagged[mod_msg.id] = report
+            embed.add_field(name="Flagged Message", value=f"{msg.author.name}: {msg.content}", inline=False)
+        embed.add_field(name="AI Suspected?", value=report.q1_response or "N/A", inline=True)
+        embed.add_field(name="User Blocked?",  value=report.block_response or "N/A", inline=True)
         mod_msg = await mod_ch.send(embed=embed)
-        
+        embed.set_footer(text=f"Report ID: {mod_msg.id}")
+        await mod_msg.edit(embed=embed)
+        self.flagged[mod_msg.id] = report
 
-    # 
     async def handle_dm(self, message):
         '''
         This function is called whenever a message is sent in the DMs 
@@ -133,10 +132,12 @@ class ModBot(discord.Client):
         # Always reset report if user says "report"
         if message.content.strip().lower() == Report.START_KEYWORD: 
             self.reports[author_id] = Report(self)
+            self.reports[author_id].author_id = author_id
 
         # If no current report, create one
         if author_id not in self.reports:
             self.reports[author_id] = Report(self)
+            self.reports[author_id].author_id = author_id
 
         # Handle message VIA SENDING TO REPORT.PY
         responses = await self.reports[author_id].handle_message(message)
@@ -144,7 +145,8 @@ class ModBot(discord.Client):
             await message.channel.send(r)
 
         # ****** Once a user submits their report, it's submitted as an embed to the mod channel ******
-        if self.reports[author_id].state == State.REPORT_COMPLETE:
+        # check if the author_id is in the reports dictionary once again because of the await it might have been removed
+        if author_id in self.reports and self.reports[author_id].state == State.REPORT_COMPLETE:
             report = self.reports.pop(author_id)
             await self.send_report_embed(report)
             
@@ -213,10 +215,10 @@ class ModBot(discord.Client):
         # AUTO FLAGGING CODE
         elif channel_name == group_name:
         # forward raw text to mods
-            await mod_channel.send(f'Forwarded message:\n{message.author.name}: "{message.content}"')
-            scores = self.eval_text(message.content)
+            #await mod_channel.send(f'Forwarded message:\n{message.author.name}: "{message.content}"')
+            scores = self.eval_text(message)
 
-            if scores > 0:
+            if scores == 1:
                 # build jump link
                 jump_url = f"https://discord.com/channels/{message.guild.id}/{message.channel.id}/{message.id}"
                 auto_report = Report(self)
@@ -247,14 +249,65 @@ class ModBot(discord.Client):
                     )
                 
                 mod_msg = await mod_channel.send(embed=embed)
+                embed.set_footer(text=f"Report ID: {mod_msg.id}")
+                await mod_msg.edit(embed=embed)
                 self.flagged[mod_msg.id] = auto_report
 
             else:
                 await mod_channel.send(self.code_format(scores))
 
+
+    def is_AI_generated(self, image_url ):
+        # use openai to check if the image is AI generated ask if it's ai generated or not
+        api_key = os.getenv("OPENAI_API_KEY")
+        client = OpenAI(api_key=api_key)
+        
+        # Make the API call
+        response = client.responses.create(
+            model="gpt-4.1-mini",
+            input=[{
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "Is this image AI-generated? Please respond with just 'yes' or 'no'. Consider telltale signs like unusual artifacts, perfect symmetry, unnatural patterns, or inconsistencies in details."},
+                    {
+                        "type": "input_image",
+                        "image_url": image_url,
+                    },
+                ],
+            }],
+        )
+        
+        # Get the response text
+        result = response.output_text
+        
+        # Return 1 if the response indicates AI-generated, 0 otherwise
+        return True if 'yes' in result else False
+
     def eval_text(self, message):
-        # Returns 0 or 1 for now for demo
-        return random.getrandbits(1)
+        # print msg image if it exists
+        if message.attachments:
+            for attachment in message.attachments:
+                # Get content type and convert to lowercase for case-insensitive comparison
+                content_type = attachment.content_type.lower() if attachment.content_type else ""
+                
+                # Check for all common image formats
+                valid_types = [
+                    "image/png",
+                    "image/jpeg",
+                    "image/jpg",
+                    "image/gif",
+                    "image/webp",
+                    "image/tiff",
+                    "image/bmp"
+                ]
+                
+                if content_type in valid_types:
+                    try:    
+                        return self.is_AI_generated(attachment.url)
+                    except Exception as e:
+                        logger.error(f"Error checking if image is AI-generated: {str(e)}")
+                
+        return 0
 
     
     def code_format(self, text):
