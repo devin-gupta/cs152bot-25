@@ -11,6 +11,10 @@ from report import Report, State
 from openai import OpenAI
 import pdb
 import base64
+from google.cloud import aiplatform
+from google.oauth2 import service_account
+from PIL import Image
+import io
 
 # Set up logging to the console
 logger = logging.getLogger('discord')
@@ -27,6 +31,16 @@ with open(token_path) as f:
     # If you get an error here, it means your token is formatted incorrectly. Did you put it in quotes?
     tokens = json.load(f)
     discord_token = tokens['discord']
+    google_credentials = tokens['google']
+    project_id = google_credentials['project_id']
+    region = "us-central1"  # Or your endpoint's region
+    endpoint_id = "3609790132476968960"  # Your endpoint ID
+    google_credentials_dict = tokens.get('google')
+    
+    if not google_credentials_dict:
+        raise ValueError(f"No 'google' credentials found in 'tokens.json")
+    
+
 
 
 class ModBot(discord.Client):
@@ -41,6 +55,8 @@ class ModBot(discord.Client):
         self.reviews = {}
         self.mod_channels = {} # Map from guild to the mod channel id for that guild
         self.reports = {} # Map from user IDs to the state of their report
+
+        self.credentials = service_account.Credentials.from_service_account_info(google_credentials_dict)
 
     async def on_ready(self):
         print(f'{self.user.name} has connected to Discord! It is these guilds:')
@@ -257,31 +273,84 @@ class ModBot(discord.Client):
                 await mod_channel.send(self.code_format(scores))
 
 
-    def is_AI_generated(self, image_url ):
-        # use openai to check if the image is AI generated ask if it's ai generated or not
-        api_key = os.getenv("OPENAI_API_KEY")
-        client = OpenAI(api_key=api_key)
-        
-        # Make the API call
-        response = client.responses.create(
-            model="gpt-4.1-mini",
-            input=[{
-                "role": "user",
-                "content": [
-                    {"type": "input_text", "text": "Is this image AI-generated? Please respond with just 'yes' or 'no'. Consider telltale signs like unusual artifacts, perfect symmetry, unnatural patterns, or inconsistencies in details."},
-                    {
-                        "type": "input_image",
-                        "image_url": image_url,
-                    },
-                ],
-            }],
+    def is_AI_generated(self, image_url):
+
+        aiplatform.init(project=project_id, location=region, credentials=self.credentials)
+
+        # Load the endpoint
+        endpoint = aiplatform.Endpoint(
+            endpoint_name=f"projects/{project_id}/locations/{region}/endpoints/{endpoint_id}"
         )
+
+        # Download the image
+        response = requests.get(image_url)
+        if response.status_code != 200:
+            print(f"Failed to download image. Status code: {response.status_code}")
+            return
+
+        # Open the image and resize
+        try:
+            image = Image.open(io.BytesIO(response.content)).convert("RGB")
+        except Exception as e:
+            print(f"Error opening image: {e}")
+            return
+
+        original_size = image.size
+        print(f"Original image size: {original_size}")
+
+        # Resize if necessary
+        max_dimension = 1024
+        if max(original_size) > max_dimension:
+            image.thumbnail((max_dimension, max_dimension), Image.LANCZOS)
+            print(f"Resized image size: {image.size}")
+        else:
+            print("No resizing needed.")
+
+        # Save image to a BytesIO object
+        buffered = io.BytesIO()
+        image.save(buffered, format="JPEG")
+        image_bytes = buffered.getvalue()
+
+        # Encode image to base64
+        encoded_string = base64.b64encode(image_bytes).decode('utf-8')
+        print(f"Encoded image size: {len(encoded_string)} characters")
+
+        # Prepare the instance for prediction
+        instances = [{"content": {"b64": encoded_string}}]
+        print(f"Instances size: {len(instances)}")
+
+        # Make the prediction
+        try:
+            predictions = endpoint.predict(instances=instances).predictions
+            print(f"Predictions: {predictions}")
+        except Exception as e:
+            print(f"Error during prediction: {e}")
+
+        # # use openai to check if the image is AI generated ask if it's ai generated or not
+        # # api_key = os.getenv("OPENAI_API_KEY")
+        # api_key = tokens['openai']
+        # client = OpenAI(api_key=api_key)
         
-        # Get the response text
-        result = response.output_text
+        # # Make the API call
+        # response = client.responses.create(
+        #     model="gpt-4.1-mini",
+        #     input=[{
+        #         "role": "user",
+        #         "content": [
+        #             {"type": "input_text", "text": "Is this image AI-generated? Please respond with just 'yes' or 'no'. Consider telltale signs like unusual artifacts, perfect symmetry, unnatural patterns, or inconsistencies in details."},
+        #             {
+        #                 "type": "input_image",
+        #                 "image_url": image_url,
+        #             },
+        #         ],
+        #     }],
+        # )
         
-        # Return 1 if the response indicates AI-generated, 0 otherwise
-        return True if 'yes' in result else False
+        # # Get the response text
+        # result = response.output_text
+        
+        # # Return 1 if the response indicates AI-generated, 0 otherwise
+        # return True if 'yes' in result else False
 
     def eval_text(self, message):
         # print msg image if it exists
