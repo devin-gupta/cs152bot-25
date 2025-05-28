@@ -276,55 +276,40 @@ class ModBot(discord.Client):
     def is_AI_generated(self, image_url):
 
         aiplatform.init(project=project_id, location=region, credentials=self.credentials)
-
-        # Load the endpoint
         endpoint = aiplatform.Endpoint(
             endpoint_name=f"projects/{project_id}/locations/{region}/endpoints/{endpoint_id}"
         )
 
-        # Download the image
+        # download the image from provided (discord) URL
         response = requests.get(image_url)
         if response.status_code != 200:
             print(f"Failed to download image. Status code: {response.status_code}")
             return
 
-        # Open the image and resize
+        # open the image with some error handling
         try:
             image = Image.open(io.BytesIO(response.content)).convert("RGB")
         except Exception as e:
             print(f"Error opening image: {e}")
             return
 
-        original_size = image.size
-        print(f"Original image size: {original_size}")
+        # create instance object for prediction with base64 encoding
+        buffer = io.BytesIO()
+        image.save(buffer, format="JPEG")
+        jpeg_bytes = buffer.getvalue()
+        b64_image = base64.b64encode(jpeg_bytes).decode("utf-8")
+        instances = [{"content": b64_image}]
 
-        # Resize if necessary
-        max_dimension = 1024
-        if max(original_size) > max_dimension:
-            image.thumbnail((max_dimension, max_dimension), Image.LANCZOS)
-            print(f"Resized image size: {image.size}")
-        else:
-            print("No resizing needed.")
-
-        # Save image to a BytesIO object
-        buffered = io.BytesIO()
-        image.save(buffered, format="JPEG")
-        image_bytes = buffered.getvalue()
-
-        # Encode image to base64
-        encoded_string = base64.b64encode(image_bytes).decode('utf-8')
-        print(f"Encoded image size: {len(encoded_string)} characters")
-
-        # Prepare the instance for prediction
-        instances = [{"content": {"b64": encoded_string}}]
-        print(f"Instances size: {len(instances)}")
+        prediction = endpoint.predict(instances=instances)
 
         # Make the prediction
         try:
-            predictions = endpoint.predict(instances=instances).predictions
-            print(f"Predictions: {predictions}")
+            predictions = endpoint.predict(instances=instances).predictions[0].get('confidences')[1]
+            logger.info(f"Completed a prediction, prob of AI: {predictions}")
         except Exception as e:
             print(f"Error during prediction: {e}")
+
+        return predictions > 0.5  # if confidence is greater than 50%, return True for AI generated else False
 
         # # use openai to check if the image is AI generated ask if it's ai generated or not
         # # api_key = os.getenv("OPENAI_API_KEY")
