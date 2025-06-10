@@ -6,6 +6,8 @@ Demo Video - https://drive.google.com/file/d/17rFQq9UFB3GVIeC9HL5NMFG-zqApyeVP/v
 
 Poster - https://drive.google.com/file/d/1cyJ08VYm4g9VJkH38jx1fMoQgq5_5Jdm/view?usp=sharing
 
+PDID Paper - https://arxiv.org/html/2409.15319v1
+
 
 
 
